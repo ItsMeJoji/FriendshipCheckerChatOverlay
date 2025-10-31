@@ -1,0 +1,4 @@
+Flask
+twitchio
+asyncio
+Flask_SocketIO
