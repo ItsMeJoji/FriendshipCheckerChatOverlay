@@ -117,24 +117,23 @@ class MyComponent(commands.Component):
 
         bot = self.bot
 
+        if payload.chatter == bot.user:
+            return
+
         """For Logging Purposes."""
         print(f"[{payload.broadcaster.name}] - {payload.chatter.name}: {payload.text}")
 
         """Garble message with a 1 in 50 chance"""
-        if random.randint(1, 2) == 1:
+        if random.randint(1, 50) == 1:
 
             print(f"Garbling message from {payload.chatter.name}")
             garbled_content = glitch_text(payload.text)
             
-            response = f"[{payload.chatter.name}] ERROR: Data Integrity Compromised! {garbled_content}"
+            response = f"{payload.chatter.name} ERROR: Message Integrity Compromised - {garbled_content}"
             print(f"Responding with: {response}")
 
-            # user = bot.create_partialuser(user_id="1388303571")
-            # print(f"Sending message as bot user: {user.name}")
-            # await user.send_message(sender="1388303571", message=response)
-
-            channel = bot.get_channel("1388303571")
-            await channel.send(response)
+        #NEW CODE GOES HERE
+            await payload.respond(response)
 
     @commands.command()
     async def lurk(self, ctx: commands.Context) -> None:
@@ -198,15 +197,15 @@ class MyComponent(commands.Component):
 
         !socials
         """
-        await ctx.send("x.com/itsmejoji_, youtube.com/itsmejoji")
+        await ctx.send("X/Twitter: x.com/itsmejoji_, Youtube: youtube.com/itsmejoji")
 
-    @socials.command(name="discord")
-    async def socials_discord(self, ctx: commands.Context) -> None:
+    @commands.command(name="discord")
+    async def discord(self, ctx: commands.Context) -> None:
         """Sub command of socials that sends only our discord invite.
 
-        !socials discord
+        !discord
         """
-        await ctx.send("discord.gg/...")
+        await ctx.send("Join the Discord! https://discord.gg/N3QAw5ECSq")
 
 
 async def setup_database(db: asqlite.Pool) -> tuple[list[tuple[str, str]], list[eventsub.SubscriptionPayload]]:
