@@ -57,7 +57,6 @@ class Bot(commands.AutoBot):
         )
 
     async def setup_hook(self) -> None:
-        # Add our component which contains our commands...
         await self.add_component(MyComponent(self))
 
     async def event_oauth_authorized(self, payload: twitchio.authentication.UserTokenPayload) -> None:
@@ -67,7 +66,6 @@ class Bot(commands.AutoBot):
             return
 
         if payload.user_id == self.bot_id:
-            # We usually don't want subscribe to events on the bots channel...
             return
 
         # A list of subscriptions we would like to make to the newly authorized channel...
@@ -107,11 +105,9 @@ class MyComponent(commands.Component):
     # You can use Components within modules for a more organized codebase and hot-reloading.
 
     def __init__(self, bot: Bot) -> None:
-        # Passing args is not required...
-        # We pass bot here as an example...
+
         self.bot = bot
 
-    # We use a listener in our Component to display the messages received.
     @commands.Component.listener()
     async def event_message(self, payload) -> None:
 
@@ -125,15 +121,20 @@ class MyComponent(commands.Component):
 
         """Garble message with a 1 in 50 chance"""
         if random.randint(1, 50) == 1:
-
             print(f"Garbling message from {payload.chatter.name}")
             garbled_content = glitch_text(payload.text)
-            
-            response = f"{payload.chatter.name} ERROR: Message Integrity Compromised - {garbled_content}"
-            print(f"Responding with: {response}")
-
-        #NEW CODE GOES HERE
+            response = f"ATTENTION {payload.chatter.name}! ERROR: Message Integrity Compromised - {garbled_content}"
             await payload.respond(response)
+
+        """Porygon Mentioned? Notify with a 1 in 10 chance"""
+        if "porygon" in payload.text.lower() and random.randint(1, 10) == 1:
+            await payload.respond("NOTICE: Superior Entity Mentioned!")
+
+        """Lag Detected? Always notify."""
+        if ["lag", "lagging", "lagged"].count(payload.text.lower()) > 0:
+            await payload.respond("ALERT: Lag Detected - Run Diagnostics...")
+
+
 
     @commands.command()
     async def lurk(self, ctx: commands.Context) -> None:
@@ -141,55 +142,21 @@ class MyComponent(commands.Component):
 
         !lurk
         """
-        await ctx.send(f"Thanks for lurking, {ctx.chatter.name}!")
+        await ctx.send(f"LURK ACKNOWLEDGED - Thanks {ctx.chatter.name}!")
 
-    # @commands.command()
-    # async def hi(self, ctx: commands.Context) -> None:
-    #     """Command that replies to the invoker with Hi <name>!
+    @commands.command()
+    async def uptime(self, ctx: commands.Context) -> None:
+        """A simple command which tells how long the stream has been live.
 
-    #     !hi
-    #     """
-    #     await ctx.reply(f"Hi {ctx.chatter}!")
+        !uptime
+        """
+        stream = await ctx.get_stream()
+        if stream is None:
+            await ctx.send("ERROR: The stream is currently offline.")
+            return
 
-    # @commands.command()
-    # async def say(self, ctx: commands.Context, *, message: str) -> None:
-    #     """Command which repeats what the invoker sends.
-
-    #     !say <message>
-    #     """
-    #     await ctx.send(message)
-
-    # @commands.command()
-    # async def add(self, ctx: commands.Context, left: int, right: int) -> None:
-    #     """Command which adds to integers together.
-
-    #     !add <number> <number>
-    #     """
-    #     await ctx.reply(f"{left} + {right} = {left + right}")
-
-    # @commands.command()
-    # async def choice(self, ctx: commands.Context, *choices: str) -> None:
-    #     """Command which takes in an arbitrary amount of choices and randomly chooses one.
-
-    #     !choice <choice_1> <choice_2> <choice_3> ...
-    #     """
-    #     await ctx.reply(f"You provided {len(choices)} choices, I choose: {random.choice(choices)}")
-
-    # @commands.command(aliases=["thanks", "thank"])
-    # async def give(self, ctx: commands.Context, user: twitchio.User, amount: int, *, message: str | None = None) -> None:
-    #     """A more advanced example of a command which has makes use of the powerful argument parsing, argument converters and
-    #     aliases.
-
-    #     The first argument will be attempted to be converted to a User.
-    #     The second argument will be converted to an integer if possible.
-    #     The third argument is optional and will consume the reast of the message.
-
-    #     !give <@user|user_name> <number> [message]
-    #     !thank <@user|user_name> <number> [message]
-    #     !thanks <@user|user_name> <number> [message]
-    #     """
-    #     msg = f"with message: {message}" if message else ""
-    #     await ctx.send(f"{ctx.chatter.mention} gave {amount} thanks to {user.mention} {msg}")
+        uptime = twitchio.utils.format_timedelta(stream.uptime)
+        await ctx.send(f"NOTICE: Stream has been live for {uptime}")
 
     @commands.group(invoke_fallback=True)
     async def socials(self, ctx: commands.Context) -> None:
@@ -197,7 +164,7 @@ class MyComponent(commands.Component):
 
         !socials
         """
-        await ctx.send("X/Twitter: x.com/itsmejoji_, Youtube: youtube.com/itsmejoji")
+        await ctx.send("NOTICE: You can find all socials here: https://itsmejoji.com")
 
     @commands.command(name="discord")
     async def discord(self, ctx: commands.Context) -> None:
@@ -205,7 +172,20 @@ class MyComponent(commands.Component):
 
         !discord
         """
-        await ctx.send("Join the Discord! https://discord.gg/N3QAw5ECSq")
+        await ctx.send("NOTICE: Join the Discord! https://discord.gg/N3QAw5ECSq")
+
+    @commands.command()
+    async def shinyroll(self, ctx: commands.Context) -> None:
+        """A command that gives information about Shiny Luck.
+
+        !shinyluck
+        """
+        shinyRoll = random.randint(1, 8192)
+
+        if shinyRoll == 8192:
+            await ctx.send(f"RESULT: AMAZING {ctx.chatter.name}! You rolled {shinyRoll}!!!")
+        else:
+            await ctx.send("RESULT: {ctx.chatter.name} rolled {shinyRoll}!")
 
 
 async def setup_database(db: asqlite.Pool) -> tuple[list[tuple[str, str]], list[eventsub.SubscriptionPayload]]:
