@@ -6,6 +6,7 @@ This bot can be restarted as many times without needing to subscribe or worry ab
 
 """
 import os
+import re
 import asyncio
 import logging
 import random
@@ -119,6 +120,10 @@ class MyComponent(commands.Component):
         """For Logging Purposes."""
         print(f"[{payload.broadcaster.name}] - {payload.chatter.name}: {payload.text}")
 
+        """For Parsing Purposes."""
+        parsedMessage = re.split(r'\W+', payload.text.lower())
+        # print(parsedMessage)
+
         """Garble message with a 1 in 50 chance"""
         if random.randint(1, 50) == 1:
             print(f"Garbling message from {payload.chatter.name}")
@@ -131,10 +136,27 @@ class MyComponent(commands.Component):
             await payload.respond("NOTICE: Superior Entity Mentioned!")
 
         """Lag Detected? Always notify."""
-        if ["lag", "lagging", "lagged"].count(payload.text.lower()) > 0:
+        lagTerms = ["lag", "lagging", "lagged"]
+        if any(term in payload.text.lower() for term in lagTerms) and random.randint(1, 10) == 1:
             await payload.respond("ALERT: Lag Detected - Run Diagnostics...")
 
+        """Greet Chatters on Hello messages"""
+        greetingTerms = ["hello", "hi", "hey", "yo", "sup", "greetings", "good morning", "good afternoon", "good evening", "howdy", "how are you", "what's up"]
 
+        """ Debug Prints """
+        # print(any(term in payload.text.lower() for term in greetingTerms if ' ' in term))
+        # print(any(word in greetingTerms for word in parsedMessage if ' ' not in word))
+
+        if any(term in payload.text.lower() for term in greetingTerms if ' ' in term) or any(word in greetingTerms for word in parsedMessage if ' ' not in word):
+            await payload.respond(f"GREETING: Hello {payload.chatter.name}! Welcome to the stream, hope you enjoy your time here! itsmej18Love")
+
+    @commands.command()
+    async def porygonbot(self, ctx: commands.Context) -> None:
+        """A simple command which introduces the bot.
+
+        !porygonbot
+        """
+        await ctx.send("NOTICE: I am Porygon Bot, a Twitch chat bot created by Joji! You can use commands like !lurk, !shinyroll, and !socials to interact with me! If you have any suggestions, feel free to let Joji know!")
 
     @commands.command()
     async def lurk(self, ctx: commands.Context) -> None:
@@ -144,19 +166,19 @@ class MyComponent(commands.Component):
         """
         await ctx.send(f"LURK ACKNOWLEDGED - Thanks {ctx.chatter.name}!")
 
-    @commands.command()
-    async def uptime(self, ctx: commands.Context) -> None:
-        """A simple command which tells how long the stream has been live.
+    # @commands.command()
+    # async def uptime(self, ctx: commands.Context) -> None:
+    #     """A simple command which tells how long the stream has been live.
 
-        !uptime
-        """
-        stream = await ctx.get_stream()
-        if stream is None:
-            await ctx.send("ERROR: The stream is currently offline.")
-            return
+    #     !uptime
+    #     """
+    #     stream = await ctx.get_stream()
+    #     if stream is None:
+    #         await ctx.send("ERROR: The stream is currently offline.")
+    #         return
 
-        uptime = twitchio.utils.format_timedelta(stream.uptime)
-        await ctx.send(f"NOTICE: Stream has been live for {uptime}")
+    #     uptime = twitchio.utils.format_timedelta(stream.uptime)
+    #     await ctx.send(f"NOTICE: Stream has been live for {uptime}")
 
     @commands.group(invoke_fallback=True)
     async def socials(self, ctx: commands.Context) -> None:
@@ -178,14 +200,14 @@ class MyComponent(commands.Component):
     async def shinyroll(self, ctx: commands.Context) -> None:
         """A command that gives information about Shiny Luck.
 
-        !shinyluck
+        !shinyroll
         """
         shinyRoll = random.randint(1, 8192)
 
         if shinyRoll == 8192:
             await ctx.send(f"RESULT: AMAZING {ctx.chatter.name}! You rolled {shinyRoll}!!!")
         else:
-            await ctx.send("RESULT: {ctx.chatter.name} rolled {shinyRoll}!")
+            await ctx.send(f"RESULT: {ctx.chatter.name} rolled {shinyRoll}!")
 
 
 async def setup_database(db: asqlite.Pool) -> tuple[list[tuple[str, str]], list[eventsub.SubscriptionPayload]]:
