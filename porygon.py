@@ -9,15 +9,21 @@ import json
 import os
 import re
 import asyncio
+import csv
+import difflib
+import io
 import logging
 import random
 import string
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import asqlite
 
 import twitchio
+from twitchio.exceptions import HTTPException
 from twitchio import eventsub
 from twitchio.ext import commands
 from twitchio.user import PartialUser, User
@@ -37,6 +43,9 @@ OWNER_ID = "68184174"  # Your personal User ID..
 # Characters to use for garbling text
 GARBLE_CHARS = string.ascii_letters + string.digits + "!@#$%^&*()_+=-,/?<>:;|\\[]{}"
 PROMO_CONFIG_PATH = Path(__file__).with_name("promo_messages.json")
+TOKEN_DATABASE_PATH = Path(__file__).with_name("tokens.db")
+DOCKET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT8OBGqnDQoznslLTWZyBcysxWijxoTHZMUhVCySH1FlbGNRxW_0z00R5o2GBMUSq-LxoWv_GTKe6g7/pub?gid=0&single=true&output=csv"
+DOCKET_POSITION_KEY = "docket_position"
 
 def glitch_text(text: str) -> str:
     """Replaces each character in a string with a random garbled character."""
@@ -44,6 +53,21 @@ def glitch_text(text: str) -> str:
     for _ in text:
         garbled_message += random.choice(GARBLE_CHARS)
     return garbled_message
+
+
+def _normalize_category_name(name: str) -> str:
+    return re.sub(r"\s+", " ", name.strip()).casefold()
+
+
+def _download_docket_games() -> list[str]:
+    with urllib.request.urlopen(DOCKET_CSV_URL, timeout=15) as response:
+        csv_text = response.read().decode("utf-8-sig")
+
+    reader = csv.DictReader(io.StringIO(csv_text))
+    if reader.fieldnames is None or "Game" not in reader.fieldnames:
+        raise ValueError("The docket CSV is missing a 'Game' column.")
+
+    return [str(row.get("Game", "")).strip() for row in reader if str(row.get("Game", "")).strip()]
 
 
 def _normalize_promo_entry(entry: object, *, index: int) -> dict[str, object] | None:
@@ -97,7 +121,7 @@ class Bot(commands.AutoBot):
             subscriptions=subs,
             force_subscribe=True,
             redirect_uri="http://localhost:4343/oauth/callback",
-            scopes=["user:read:chat", "user:write:chat", "user:bot"],
+            scopes=["user:read:chat", "user:write:chat", "user:bot", "channel:manage:broadcast"],
         )
 
     async def setup_hook(self) -> None:
@@ -114,7 +138,8 @@ class Bot(commands.AutoBot):
                 scopes = twitchio.Scopes(
                     user_read_chat=True,
                     user_write_chat=True,
-                    channel_bot=True
+                    channel_bot=True,
+                    channel_manage_broadcast=True,
                 )
                 auth_url = self.adapter.get_authorization_url(scopes=scopes)
                 
@@ -189,6 +214,129 @@ class MyComponent(commands.Component):
             return None
 
         return PartialUser(id=self.bot.owner_id, http=self.bot._http)
+
+    def _is_owner(self, ctx: commands.Context) -> bool:
+        return str(ctx.author.id) == self.bot.owner_id
+
+    async def _get_docket_position(self) -> int:
+        async with self.bot.token_database.acquire() as connection:
+            row = await connection.fetchone("SELECT value FROM config WHERE key = ?", (DOCKET_POSITION_KEY,))
+
+        if row is None:
+            return 1
+
+        try:
+            return max(1, int(row["value"]))
+        except (TypeError, ValueError):
+            return 1
+
+    async def _set_docket_position(self, position: int) -> None:
+        async with self.bot.token_database.acquire() as connection:
+            await connection.execute(
+                "INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (DOCKET_POSITION_KEY, str(position)),
+            )
+
+    async def _has_broadcaster_token(self) -> bool:
+        async with self.bot.token_database.acquire() as connection:
+            row = await connection.fetchone("SELECT 1 FROM tokens WHERE user_id = ?", (self.bot.owner_id,))
+
+        return row is not None
+
+    async def _fetch_docket_games(self) -> list[str]:
+        return await asyncio.to_thread(_download_docket_games)
+
+    async def _get_docket_game(self, position: int) -> str | None:
+        games = await self._fetch_docket_games()
+        if position < 1 or position > len(games):
+            return None
+
+        return games[position - 1]
+
+    async def _find_twitch_category(self, game_name: str) -> twitchio.Game | None:
+        broadcaster = self._get_broadcaster()
+        token_for = broadcaster or self.bot.owner_id
+
+        exact_game = await self.bot.fetch_game(name=game_name, token_for=token_for)
+        if exact_game is not None:
+            return exact_game
+
+        search_results = [
+            game
+            async for game in self.bot.search_categories(
+                game_name,
+                token_for=token_for,
+                first=10,
+                max_results=10,
+            )
+        ]
+        if not search_results:
+            return None
+
+        normalized_query = _normalize_category_name(game_name)
+        for game in search_results:
+            if _normalize_category_name(game.name) == normalized_query:
+                return game
+
+        scored_results = [
+            (difflib.SequenceMatcher(None, normalized_query, _normalize_category_name(game.name)).ratio(), game)
+            for game in search_results
+        ]
+        score, game = max(scored_results, key=lambda item: item[0])
+        if score < 0.55:
+            return None
+
+        return game
+
+    async def _update_category_from_position(self, ctx: commands.Context, position: int) -> None:
+        try:
+            game_name = await self._get_docket_game(position)
+        except (OSError, TimeoutError, urllib.error.URLError, ValueError) as exc:
+            LOGGER.exception("Failed to read docket CSV: %s", exc)
+            await ctx.send("TRACE FAILED: Could not read the Stream Docket CSV.")
+            return
+
+        if game_name is None:
+            await ctx.send(f"TRACE FAILED: Docket slot {position} is out of range.")
+            return
+
+        try:
+            category = await self._find_twitch_category(game_name)
+        except HTTPException as exc:
+            LOGGER.exception("Failed to search Twitch categories: %s", exc)
+            await ctx.send("TRACE FAILED: Twitch category search failed.")
+            return
+
+        if category is None:
+            await ctx.send(f"TRACE FAILED: No Twitch category match found for docket slot {position}: {game_name}.")
+            return
+
+        broadcaster = self._get_broadcaster()
+        if broadcaster is None:
+            await ctx.send("TRACE FAILED: Broadcaster identity could not be resolved.")
+            return
+
+        if not await self._has_broadcaster_token():
+            await ctx.send("TRACE FAILED: No broadcaster token is stored. Please use Porygon Bot's OAuth link, not Twitch Token Generator, so I can store channel:manage:broadcast for this channel.")
+            return
+
+        try:
+            await broadcaster.modify_channel(game_id=category.id)
+        except HTTPException as exc:
+            if exc.status in {401, 403}:
+                await ctx.send("TRACE FAILED: Broadcast update permission missing. Please reauthorize Porygon Bot with channel:manage:broadcast.")
+                return
+
+            LOGGER.exception("Failed to update channel category: %s", exc)
+            await ctx.send("TRACE FAILED: Twitch rejected the category update.")
+            return
+        except Exception as exc:
+            LOGGER.exception("Failed to update channel category: %s", exc)
+            await ctx.send("TRACE FAILED: Category update encountered an unexpected error.")
+            return
+
+        await self._set_docket_position(position)
+        await ctx.send(f"TRACE COMPLETE: Docket slot {position} locked to Twitch category: {category.name}.")
 
     def _load_promo_entries(self) -> list[dict[str, object]]:
         if not self._promo_config_path.exists():
@@ -302,8 +450,8 @@ class MyComponent(commands.Component):
         parsedMessage = re.split(r'\W+', payload.text.lower())
         # print(parsedMessage)
 
-        """Garble message with a 1 in 50 chance"""
-        if random.randint(1, 50) == 1:
+        """Garble message with a 1 in 25 chance"""
+        if random.randint(1, 25) == 1:
             print(f"Garbling message from {payload.chatter.name}")
             garbled_content = glitch_text(payload.text)
             response = f"ATTENTION {payload.chatter.name}! ERROR: Message Integrity Compromised - {garbled_content}"
@@ -350,6 +498,50 @@ class MyComponent(commands.Component):
         !lurk
         """
         await ctx.send(f"LURK ACKNOWLEDGED - Thanks {ctx.chatter.name}!")
+
+    @commands.command()
+    async def join(self, ctx: commands.Context) -> None:
+        """Make the bot send !join. Only usable by the broadcaster.
+
+        !join
+        """
+        if not self._is_owner(ctx):
+            return
+
+        await ctx.send("!join")
+
+    @commands.command(name="update", aliases=["updatecategory", "scanitem", "docketscan"])
+    async def update_category(self, ctx: commands.Context, *, position: str = "") -> None:
+        """Update the stream category from a docket row. Only usable by the broadcaster.
+
+        !update <position>
+        """
+        if not self._is_owner(ctx):
+            return
+
+        try:
+            docket_position = int(position.strip())
+        except ValueError:
+            await ctx.send("INPUT ERROR: Use !update <docket slot>, for example !update 1.")
+            return
+
+        if docket_position < 1:
+            await ctx.send("INPUT ERROR: Docket slot must be 1 or higher.")
+            return
+
+        await self._update_category_from_position(ctx, docket_position)
+
+    @commands.command(aliases=["nextdocket", "nextscan"])
+    async def nextitem(self, ctx: commands.Context) -> None:
+        """Advance to the next docket row and update the stream category. Only usable by the broadcaster.
+
+        !nextitem
+        """
+        if not self._is_owner(ctx):
+            return
+
+        docket_position = await self._get_docket_position() + 1
+        await self._update_category_from_position(ctx, docket_position)
 
     # @commands.command()
     # async def uptime(self, ctx: commands.Context) -> None:
@@ -460,6 +652,7 @@ async def setup_database(db: asqlite.Pool) -> tuple[list[tuple[str, str]], list[
 
         # Seed default bingo link if not exists
         await connection.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('bingo', 'https://bingo.itsmejoji.com')")
+        await connection.execute("INSERT OR IGNORE INTO config (key, value) VALUES (?, '1')", (DOCKET_POSITION_KEY,))
 
         # Fetch any existing tokens...
         rows: list[sqlite3.Row] = await connection.fetchall("""SELECT * from tokens""")
@@ -488,7 +681,7 @@ def main() -> None:
     twitchio.utils.setup_logging(level=logging.INFO)
 
     async def runner() -> None:
-        async with asqlite.create_pool("tokens.db") as tdb:
+        async with asqlite.create_pool(TOKEN_DATABASE_PATH) as tdb:
             tokens, subs = await setup_database(tdb)
 
             async with Bot(token_database=tdb, subs=subs) as bot:
