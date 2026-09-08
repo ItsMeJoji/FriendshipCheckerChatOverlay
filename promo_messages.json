@@ -2,7 +2,8 @@
   "periodic_messages": [
     {
       "name": "socials",
-      "interval_minutes": 60,
+      "min_interval_minutes": 30,
+      "max_interval_minutes": 60,
       "messages": [
         "NOTICE: You can find all socials here: https://itsmejoji.com"
       ],
@@ -10,17 +11,28 @@
     },
     {
       "name": "discord",
-      "interval_minutes": 70,
+      "min_interval_minutes": 30,
+      "max_interval_minutes": 60,
       "messages": [
-        "NOTICE: Join the Discord! https://discord.gg/N3QAw5ECSq"
+        "NOTICE: Join the Discord! https://discord.gg/JMRfhtVtE4"
       ],
       "randomize": false
     },
     {
       "name": "docket",
-      "interval_minutes": 120,
+      "min_interval_minutes": 30,
+      "max_interval_minutes": 60,
       "messages": [
         "NOTICE: Today's Docket can be found here: https://itsmejoji.github.io/StreamAssets/docket.html"
+      ],
+      "randomize": false
+    },
+    {
+      "name": "commands",
+      "min_interval_minutes": 30,
+      "max_interval_minutes": 60,
+      "messages": [
+        "NOTICE: View all available commands here: https://itsmejoji.github.io/StreamAssets/commands.html"
       ],
       "randomize": false
     }

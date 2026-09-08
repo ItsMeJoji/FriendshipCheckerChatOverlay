@@ -15,6 +15,7 @@ import io
 import logging
 import random
 import string
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -46,6 +47,8 @@ PROMO_CONFIG_PATH = Path(__file__).with_name("promo_messages.json")
 TOKEN_DATABASE_PATH = Path(__file__).with_name("tokens.db")
 DOCKET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT8OBGqnDQoznslLTWZyBcysxWijxoTHZMUhVCySH1FlbGNRxW_0z00R5o2GBMUSq-LxoWv_GTKe6g7/pub?gid=0&single=true&output=csv"
 DOCKET_POSITION_KEY = "docket_position"
+CLIP_COOLDOWN_SECONDS = 30.0
+STREAM_MARKER_DESCRIPTION_LIMIT = 140
 
 def glitch_text(text: str) -> str:
     """Replaces each character in a string with a random garbled character."""
@@ -57,6 +60,33 @@ def glitch_text(text: str) -> str:
 
 def _normalize_category_name(name: str) -> str:
     return re.sub(r"\s+", " ", name.strip()).casefold()
+
+
+def _format_duration(total_seconds: int) -> str:
+    minutes, seconds = divmod(max(0, total_seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+
+    if hours:
+        return f"{hours}:{minutes:02}:{seconds:02}"
+
+    return f"{minutes}:{seconds:02}"
+
+
+def _trim_marker_description(description: str) -> str:
+    if len(description) <= STREAM_MARKER_DESCRIPTION_LIMIT:
+        return description
+
+    return description[: STREAM_MARKER_DESCRIPTION_LIMIT - 3].rstrip() + "..."
+
+
+def _build_clip_marker_description(chatter_name: str, reason: str) -> str:
+    base = f"!clip by {chatter_name}"
+    reason = re.sub(r"\s+", " ", reason.strip())
+
+    if not reason:
+        return base
+
+    return _trim_marker_description(f"{base}: {reason}")
 
 
 def _download_docket_games() -> list[str]:
@@ -76,11 +106,29 @@ def _normalize_promo_entry(entry: object, *, index: int) -> dict[str, object] | 
         LOGGER.warning("Skipping promo entry %s because it is not an object.", index + 1)
         return None
 
+    min_interval = entry.get("min_interval_minutes")
+    max_interval = entry.get("max_interval_minutes")
     interval = entry.get("interval_minutes")
     messages = entry.get("messages")
 
-    if not isinstance(interval, (int, float)) or interval <= 0:
-        LOGGER.warning("Skipping promo entry %s because interval_minutes is invalid.", index + 1)
+    if isinstance(min_interval, (int, float)) and isinstance(max_interval, (int, float)):
+        min_val = float(min_interval)
+        max_val = float(max_interval)
+    elif isinstance(interval, (int, float)):
+        min_val = float(interval)
+        max_val = float(interval)
+    elif isinstance(min_interval, (int, float)):
+        min_val = float(min_interval)
+        max_val = float(min_interval)
+    elif isinstance(max_interval, (int, float)):
+        min_val = float(max_interval)
+        max_val = float(max_interval)
+    else:
+        LOGGER.warning("Skipping promo entry %s because interval config is invalid.", index + 1)
+        return None
+
+    if min_val <= 0 or max_val < min_val:
+        LOGGER.warning("Skipping promo entry %s because interval bounds are invalid (min: %s, max: %s).", index + 1, min_val, max_val)
         return None
 
     if isinstance(messages, str):
@@ -101,13 +149,16 @@ def _normalize_promo_entry(entry: object, *, index: int) -> dict[str, object] | 
 
     return {
         "name": str(name),
-        "interval_minutes": float(interval),
+        "min_interval_minutes": min_val,
+        "max_interval_minutes": max_val,
         "messages": normalized_messages,
         "randomize": randomize,
     }
 
 # Our main Bot class
 class Bot(commands.AutoBot):
+    REQUIRED_SCOPE_NAMES = ["user:read:chat", "user:write:chat", "user:bot", "channel:manage:broadcast", "clips:edit"]
+
     def __init__(self, *, token_database: asqlite.Pool, subs: list[eventsub.SubscriptionPayload]) -> None:
         self.token_database = token_database
         self.initial_subs_count = len(subs)
@@ -121,8 +172,31 @@ class Bot(commands.AutoBot):
             subscriptions=subs,
             force_subscribe=True,
             redirect_uri="http://localhost:4343/oauth/callback",
-            scopes=["user:read:chat", "user:write:chat", "user:bot", "channel:manage:broadcast"],
+            scopes=self.REQUIRED_SCOPE_NAMES,
         )
+
+    def _required_scopes(self) -> twitchio.Scopes:
+        return twitchio.Scopes(
+            user_read_chat=True,
+            user_write_chat=True,
+            channel_bot=True,
+            channel_manage_broadcast=True,
+            clips_edit=True,
+        )
+
+    def _get_authorization_url(self) -> str:
+        return self.adapter.get_authorization_url(scopes=self._required_scopes())
+
+    def _print_authorization_url(self, *, reason: str) -> None:
+        try:
+            print("\n" + "="*50, flush=True)
+            print(reason, flush=True)
+            print("Authorize or reauthorize the broadcaster account with these scopes:", flush=True)
+            print(", ".join(self.REQUIRED_SCOPE_NAMES), flush=True)
+            print(self._get_authorization_url(), flush=True)
+            print("="*50 + "\n", flush=True)
+        except Exception as exc:
+            print(f"EXCEPTION generating Auth URL: {exc}", flush=True)
 
     async def setup_hook(self) -> None:
         print("SETTING UP: Adding MyComponent...")
@@ -131,25 +205,10 @@ class Bot(commands.AutoBot):
     async def event_ready(self) -> None:
         LOGGER.info("Successfully logged in as: %s", self.bot_id)
         print(f"BOT READY: {self.initial_subs_count} initial subscriptions.", flush=True)
+        self._print_authorization_url(reason="REQUIRED TWITCH OAUTH URL")
 
         if self.initial_subs_count == 0:
-            try:
-                # In TwitchIO 3.1.0, we use the Scopes helper and the adapter
-                scopes = twitchio.Scopes(
-                    user_read_chat=True,
-                    user_write_chat=True,
-                    channel_bot=True,
-                    channel_manage_broadcast=True,
-                )
-                auth_url = self.adapter.get_authorization_url(scopes=scopes)
-                
-                print("\n" + "="*50, flush=True)
-                print("NO ACTIVE SUBSCRIPTIONS FOUND!", flush=True)
-                print("Please authorize the bot to read messages in your channel:", flush=True)
-                print(f"{auth_url}", flush=True)
-                print("="*50 + "\n", flush=True)
-            except Exception as e:
-                print(f"EXCEPTION generating Auth URL: {e}", flush=True)
+            print("NO ACTIVE SUBSCRIPTIONS FOUND! Use the OAuth URL above to authorize the bot.", flush=True)
 
     async def event_error(self, payload: twitchio.payloads.EventErrorPayload) -> None:
         # In TwitchIO 3.x, event_error receives an EventErrorPayload
@@ -205,6 +264,7 @@ class MyComponent(commands.Component):
         self._promo_config_path = PROMO_CONFIG_PATH
         self._promo_tasks: list[asyncio.Task[None]] = []
         self._promo_entries: list[dict[str, object]] = []
+        self._last_clip_command_at = 0.0
 
     def _get_broadcaster(self) -> PartialUser | User | None:
         if self.bot.owner is not None:
@@ -242,6 +302,24 @@ class MyComponent(commands.Component):
             row = await connection.fetchone("SELECT 1 FROM tokens WHERE user_id = ?", (self.bot.owner_id,))
 
         return row is not None
+
+    def _describe_clip_error(self, exc: HTTPException) -> str:
+        if exc.status in {401, 403}:
+            return "permission missing; reauthorize Porygon Bot with clips:edit and channel:manage:broadcast."
+
+        if exc.status == 404:
+            return "the channel does not appear to be live."
+
+        return "Twitch rejected the clip request."
+
+    def _describe_marker_error(self, exc: HTTPException) -> str:
+        if exc.status in {401, 403}:
+            return "marker permission missing; reauthorize Porygon Bot with channel:manage:broadcast."
+
+        if exc.status == 404:
+            return "the stream is offline, VODs are disabled, or markers are unavailable."
+
+        return "Twitch rejected the stream marker request."
 
     async def _fetch_docket_games(self) -> list[str]:
         return await asyncio.to_thread(_download_docket_games)
@@ -388,15 +466,20 @@ class MyComponent(commands.Component):
         await self.bot.wait_until_ready()
 
         name = str(entry["name"])
-        interval_seconds = float(entry["interval_minutes"]) * 60.0
+        min_seconds = float(entry["min_interval_minutes"]) * 60.0
+        max_seconds = float(entry["max_interval_minutes"]) * 60.0
         messages = [str(message) for message in entry["messages"]]
         randomize = bool(entry.get("randomize", True))
 
-        LOGGER.info("Starting promo task '%s' every %s minutes.", name, entry["interval_minutes"])
+        if min_seconds == max_seconds:
+            LOGGER.info("Starting promo task '%s' every %s minutes.", name, entry["min_interval_minutes"])
+        else:
+            LOGGER.info("Starting promo task '%s' every %s-%s minutes.", name, entry["min_interval_minutes"], entry["max_interval_minutes"])
 
         try:
             while True:
-                await asyncio.sleep(interval_seconds)
+                sleep_seconds = random.uniform(min_seconds, max_seconds)
+                await asyncio.sleep(sleep_seconds)
 
                 message = random.choice(messages) if randomize else messages[0]
                 if len(message) > 500:
@@ -543,6 +626,73 @@ class MyComponent(commands.Component):
         docket_position = await self._get_docket_position() + 1
         await self._update_category_from_position(ctx, docket_position)
 
+    @commands.command()
+    async def clip(self, ctx: commands.Context, *, reason: str = "") -> None:
+        """Create a stream clip and add a stream marker.
+
+        !clip [marker description]
+        """
+        now = time.monotonic()
+        if not self._is_owner(ctx):
+            remaining = int(round(CLIP_COOLDOWN_SECONDS - (now - self._last_clip_command_at)))
+            if remaining > 0:
+                await ctx.send(f"CLIP COOLDOWN: Try again in {remaining} seconds.")
+                return
+
+        broadcaster = self._get_broadcaster()
+        if broadcaster is None:
+            await ctx.send("CLIP FAILED: Broadcaster identity could not be resolved.")
+            return
+
+        if not await self._has_broadcaster_token():
+            await ctx.send("CLIP FAILED: No broadcaster token is stored. Please authorize Porygon Bot so I can create clips and stream markers.")
+            return
+
+        token_for = self.bot.owner_id
+        marker_description = _build_clip_marker_description(ctx.chatter.name, reason)
+        self._last_clip_command_at = now
+
+        clip_url: str | None = None
+        marker_position: int | None = None
+        failures: list[str] = []
+
+        try:
+            created_clip = await broadcaster.create_clip(token_for=token_for)
+            clip_url = f"https://clips.twitch.tv/{created_clip.id}"
+        except HTTPException as exc:
+            LOGGER.exception("Failed to create Twitch clip: %s", exc)
+            failures.append(f"clip failed: {self._describe_clip_error(exc)}")
+        except Exception as exc:
+            LOGGER.exception("Failed to create Twitch clip: %s", exc)
+            failures.append("clip failed unexpectedly.")
+
+        try:
+            marker = await broadcaster.create_stream_marker(token_for=token_for, description=marker_description)
+            marker_position = marker.position
+        except HTTPException as exc:
+            LOGGER.exception("Failed to create Twitch stream marker: %s", exc)
+            failures.append(f"marker failed: {self._describe_marker_error(exc)}")
+        except ValueError as exc:
+            LOGGER.exception("Invalid Twitch stream marker description: %s", exc)
+            failures.append("marker failed: description was too long.")
+        except Exception as exc:
+            LOGGER.exception("Failed to create Twitch stream marker: %s", exc)
+            failures.append("marker failed unexpectedly.")
+
+        if clip_url is not None and marker_position is not None:
+            await ctx.send(f"CLIP CREATED: {clip_url} | Marker added at {_format_duration(marker_position)}.")
+            return
+
+        if clip_url is not None:
+            await ctx.send(f"CLIP CREATED: {clip_url} | {' '.join(failures)}")
+            return
+
+        if marker_position is not None:
+            await ctx.send(f"MARKER ADDED: {_format_duration(marker_position)} | {' '.join(failures)}")
+            return
+
+        await ctx.send(f"CLIP FAILED: {' '.join(failures)}")
+
     # @commands.command()
     # async def uptime(self, ctx: commands.Context) -> None:
     #     """A simple command which tells how long the stream has been live.
@@ -571,7 +721,7 @@ class MyComponent(commands.Component):
 
         !discord
         """
-        await ctx.send("NOTICE: Join the Discord! https://discord.gg/N3QAw5ECSq")
+        await ctx.send("NOTICE: Join the Discord! https://discord.gg/JMRfhtVtE4")
 
     @commands.command()
     async def shinyroll(self, ctx: commands.Context) -> None:
@@ -623,6 +773,14 @@ class MyComponent(commands.Component):
         !docket
         """
         await ctx.send("NOTICE: Today's Docket can be found here: https://itsmejoji.github.io/StreamAssets/docket.html")
+
+    @commands.command(name="commands", aliases=["cmds"])
+    async def commands_list(self, ctx: commands.Context) -> None:
+        """A command that gives the commands page link.
+
+        !commands
+        """
+        await ctx.send("NOTICE: View all available commands here: https://itsmejoji.github.io/StreamAssets/commands.html")
 
     @commands.command()
     async def reloadpromos(self, ctx: commands.Context) -> None:
